@@ -72,7 +72,6 @@ impl eframe::App for App {
                     if let Some(handle) = self.fetch_thread.take() {
                         let _ = handle.join();
                         self.fetch_thread = None;
-                        std::mem::drop(self.sql_sender.clone());
                     }
                 }
                 Err(_) => {}
