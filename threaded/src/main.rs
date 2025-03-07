@@ -16,7 +16,7 @@ struct Row {
 
 struct App {
     sql_sender: crossbeam_channel::Sender<Vec<Row>>,
-    sql_reciever: crossbeam_channel::Receiver<Vec<Row>>,
+    sql_receiver: crossbeam_channel::Receiver<Vec<Row>>,
     fetch_thread: Option<std::thread::JoinHandle<()>>,
     current_page: u32,
     info_retrieved: bool,
@@ -28,7 +28,7 @@ impl App {
         let (s, r) = unbounded();
         Self {
             sql_sender: s,
-            sql_reciever: r,
+            sql_receiver: r,
             fetch_thread: None,
             info_retrieved: false,
             current_page: 1,
@@ -65,12 +65,15 @@ impl eframe::App for App {
 
         // Check if the sender has finished
         if !self.info_retrieved {
-            match self.sql_reciever.try_recv() {
+            match self.sql_receiver.try_recv() {
                 Ok(t) => {
                     self.rows = Some(t);
                     self.info_retrieved = true;
-                    self.fetch_thread.take().unwrap().join();
-                    println!("Requesting repaint");
+                    if let Some(handle) = self.fetch_thread.take() {
+                        let _ = handle.join();
+                        self.fetch_thread = None;
+                        std::mem::drop(self.sql_sender.clone());
+                    }
                 }
                 Err(_) => {}
             };
@@ -81,19 +84,22 @@ impl eframe::App for App {
 
 fn delayed_fetch_operation(page: u32, sender: &crossbeam_channel::Sender<Vec<Row>>) {
     let count = 5;
-    for x in (0..count).rev() {
+    for _ in (0..count).rev() {
         std::thread::sleep(std::time::Duration::new(1, 0));
     }
 
     let mut v: Vec<Row> = Vec::new();
-    for x in (0..count) {
+    for x in 0..count {
         let row: Row = Row {
-            version: String::from(format!("ProtonGE-{}", count)),
-            path: String::from(format!("some/path/{}", count)),
+            version: String::from(format!("ProtonGE-{}", x)),
+            path: String::from(format!("some/path/{}", x)),
         };
         v.push(row);
     }
-    sender.send(v);
+    match sender.send(v) {
+        Ok(()) => {}
+        Err(_) => {}
+    }
 }
 
 fn main() {
