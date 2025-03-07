@@ -1,7 +1,7 @@
 use eframe::egui;
 
 fn main() {
-    // start_puffin_server();
+    start_puffin_server();
     let options = set_native_options();
 
     let result = eframe::run_native(
@@ -37,8 +37,6 @@ struct AnimatedRow {
     data: RowData,
     progress: f32,
     start_x: Option<f32>,
-    target_x: f32,
-    opacity: f32,
     elapsed: f32,
     animation_time: f32,
     state: AnimationState,
@@ -68,8 +66,6 @@ impl AnimatedRow {
             data: row_data,
             start_x: None,
             progress: 0.0,
-            target_x: 0.0,
-            opacity: 0.0,
             elapsed: 0.0,
             animation_time: duration,
             state,
@@ -78,6 +74,7 @@ impl AnimatedRow {
     }
 
     pub fn update(&mut self, dt: f32) -> bool {
+        puffin::profile_scope!("AnimatedRow::update");
         match self.state {
             AnimationState::Waiting => {
                 self.elapsed += dt;
@@ -121,7 +118,7 @@ impl AnimatedRowList {
     }
 
     pub fn show(&mut self, resized: bool, ui: &mut egui::Ui) -> bool {
-        // puffin::profile_scope!("show");
+        puffin::profile_scope!("AnimatedRowList::show");
         let mut row_shapes: Vec<egui::Shape> = Vec::new();
         let mut needs_redraw = false;
 
@@ -134,8 +131,14 @@ impl AnimatedRowList {
 
                 needs_redraw |= row.update(dt);
 
-                let (_, rect) =
+                let (id, rect) =
                     ui.allocate_space(egui::Vec2::new(ui.available_width(), self.row_height));
+
+                let response = ui.interact(rect, id, egui::Sense::click());
+
+                if response.clicked_by(egui::PointerButton::Primary) {
+                    println!("Row {} clicked", id.short_debug_format());
+                }
 
                 let start_x = row.start_x.unwrap();
                 let target_x = rect.left();
@@ -242,15 +245,15 @@ impl AnimationApp {
                 String::from("/home/corrupted/.local/25"),
             ),
         ];
-        it.row_list = AnimatedRowList::new(rows, 0.5, 0.1);
+        it.row_list = AnimatedRowList::new(rows, 3.0, 0.1);
         it
     }
 }
 
 impl eframe::App for AnimationApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // puffin::GlobalProfiler::lock().new_frame();
-        // puffin::profile_scope!("update");
+        puffin::GlobalProfiler::lock().new_frame();
+        puffin::profile_scope!("AnimationApp::update");
         let screen_width = ctx.input(|i| i.screen_rect.width());
         let mut need_redraw = false;
         let mut resized = false;
@@ -266,36 +269,29 @@ impl eframe::App for AnimationApp {
         if need_redraw {
             ctx.request_repaint();
         }
-
-        // egui::Window::new("FPS").show(ctx, |ui| {
-        //     ui.label(format!(
-        //         "{}",
-        //         _frame.info().cpu_usage.unwrap_or(0.0) * 1000.0
-        //     ));
-        // });
     }
 }
 
-// fn start_puffin_server() {
-//     puffin::set_scopes_on(true); // tell puffin to collect data
+fn start_puffin_server() {
+    puffin::set_scopes_on(true); // tell puffin to collect data
 
-//     match puffin_http::Server::new("127.0.0.1:8585") {
-//         Ok(puffin_server) => {
-//             // log::info!("Run:  cargo install puffin_viewer && puffin_viewer --url 127.0.0.1:8585");
+    match puffin_http::Server::new("127.0.0.1:8585") {
+        Ok(puffin_server) => {
+            // log::info!("Run:  cargo install puffin_viewer && puffin_viewer --url 127.0.0.1:8585");
 
-//             std::process::Command::new("puffin_viewer")
-//                 .arg("--url")
-//                 .arg("127.0.0.1:8585")
-//                 .spawn()
-//                 .ok();
+            std::process::Command::new("puffin_viewer")
+                .arg("--url")
+                .arg("127.0.0.1:8585")
+                .spawn()
+                .ok();
 
-//             // We can store the server if we want, but in this case we just want
-//             // it to keep running. Dropping it closes the server, so let's not drop it!
-//             #[allow(clippy::mem_forget)]
-//             std::mem::forget(puffin_server);
-//         }
-//         Err(err) => {
-//             // log::error!("Failed to start puffin server: {err}");
-//         }
-//     };
-// }
+            // We can store the server if we want, but in this case we just want
+            // it to keep running. Dropping it closes the server, so let's not drop it!
+            #[allow(clippy::mem_forget)]
+            std::mem::forget(puffin_server);
+        }
+        Err(err) => {
+            // log::error!("Failed to start puffin server: {err}");
+        }
+    };
+}

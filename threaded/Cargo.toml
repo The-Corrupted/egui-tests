@@ -1,0 +1,9 @@
+[package]
+name = "threaded"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { workspace = true }
+crossbeam = { version = "0.8.4" }
+crossbeam-channel = { version = "0.5.14" }

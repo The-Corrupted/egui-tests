@@ -1,3 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["animations"]
+members = ["animations", "threaded"]
+
+[workspace.dependencies]
+eframe = { version = "0.31.0", features = ["wgpu"] }
