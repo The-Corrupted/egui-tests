@@ -1,92 +1,56 @@
 use crossbeam_channel::unbounded;
-use eframe::egui;
-
+use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
+use std::sync::Arc;
 // START PREPROCESSOR PASTE
-
-#[derive(Default)]
-enum AnimationState {
-    Waiting,
-    #[default]
-    Animating,
-    Done,
-}
 
 #[derive(Default)]
 struct RowData {
     version: String,
     path: String,
+    text_galley: Option<Arc<egui::Galley>>, // Cached text layout
+}
+
+impl RowData {
+    fn new(version: String, path: String) -> Self {
+        Self {
+            version,
+            path,
+            text_galley: None,
+        }
+    }
 }
 
 #[derive(Default)]
 struct AnimatedRow {
     data: RowData,
-    progress: f32,
-    start_x: Option<f32>,
     start_time: f64,
-    elapsed: f32,
     animation_time: f32,
-    state: AnimationState,
     delay: f32,
+}
+
+impl AnimatedRow {
+    fn new(row_data: RowData, start_time: f64, duration: f32, delay: f32) -> Self {
+        Self {
+            data: row_data,
+            start_time,
+            animation_time: duration,
+            delay,
+        }
+    }
+
+    // Simplified animation progress calculation
+    #[inline]
+    fn get_progress(&self, time: f64) -> f32 {
+        let elapsed = (time - self.start_time - self.delay as f64).max(0.0) as f32;
+        let t = (elapsed / self.animation_time).min(1.0);
+        -t * (t - 2.0) // Inline quadratic out easin
+    }
 }
 
 #[derive(Default)]
 struct AnimatedRowList {
     rows: Vec<AnimatedRow>,
-    row_shapes: Vec<egui::Shape>,
     row_height: f32,
-}
-
-impl RowData {
-    fn new(version: String, path: String) -> Self {
-        Self { version, path }
-    }
-}
-
-impl AnimatedRow {
-    fn new(row_data: RowData, start_time: f64, duration: f32, delay: f32) -> Self {
-        let state = if delay == 0.0 {
-            AnimationState::Animating
-        } else {
-            AnimationState::Waiting
-        };
-        Self {
-            data: row_data,
-            start_x: None,
-            start_time,
-            progress: 0.0,
-            elapsed: 0.0,
-            animation_time: duration,
-            state,
-            delay,
-        }
-    }
-
-    pub fn update(&mut self, time: f64) -> bool {
-        match self.state {
-            AnimationState::Waiting => {
-                self.elapsed = (time - self.start_time) as f32;
-                if self.elapsed >= self.delay {
-                    self.state = AnimationState::Animating;
-                    self.elapsed = 0.0;
-                    self.start_time = time;
-                    return true;
-                }
-                false
-            }
-            AnimationState::Animating => {
-                self.elapsed = (time - self.start_time) as f32;
-                self.progress = egui::emath::easing::quadratic_out(
-                    (self.elapsed / self.animation_time).min(1.0),
-                );
-                if self.progress == 1.0 {
-                    self.state = AnimationState::Done;
-                    return false;
-                }
-                true
-            }
-            AnimationState::Done => false,
-        }
-    }
 }
 
 impl AnimatedRowList {
@@ -96,7 +60,6 @@ impl AnimatedRowList {
         animation_duration: f32,
         stagger_delay: f32,
     ) -> Self {
-        let len = rows.len();
         let animated_rows = rows
             .into_iter()
             .enumerate()
@@ -109,81 +72,64 @@ impl AnimatedRowList {
                 )
             })
             .collect();
-
-        let row_height = 60.0;
-
         Self {
             rows: animated_rows,
-            row_shapes: Vec::with_capacity(len * 2),
-            row_height,
+            row_height: 60.0,
         }
     }
 
-    pub fn show(&mut self, resized: bool, ui: &mut egui::Ui) -> bool {
+    #[inline]
+    pub fn show(&mut self, ui: &mut egui::Ui) {
+        let time = ui.input(|i| i.time);
         let mut needs_redraw = false;
+
         ui.vertical(|ui| {
-            let time = ui.input(|i| i.time);
             for row in &mut self.rows {
-                if row.start_x.is_none() || resized {
-                    row.start_x = Some(ui.max_rect().width());
-                }
+                let progress = row.get_progress(time);
+                needs_redraw |= progress < 1.0;
 
-                needs_redraw |= row.update(time);
+                let (_id, rect) =
+                    ui.allocate_space(Vec2::new(ui.available_width(), self.row_height));
 
-                let (id, rect) =
-                    ui.allocate_space(egui::Vec2::new(ui.available_width(), self.row_height));
-
-                let response = ui.interact(rect, id, egui::Sense::click());
-
-                if response.clicked_by(egui::PointerButton::Primary) {
-                    println!("Row {} clicked", id.short_debug_format());
-                }
-
-                let start_x = row.start_x.unwrap();
+                let start_x = rect.right();
                 let target_x = rect.left();
-                let x_offset = start_x + (target_x - start_x) * row.progress;
-                let animated_rect = egui::Rect::from_min_size(
-                    egui::Pos2::new(x_offset, rect.top()),
-                    egui::Vec2::new(rect.width(), rect.height()),
+                let x_offset = start_x + (target_x - start_x) * progress;
+                let animated_rect = Rect::from_min_size(
+                    Pos2::new(x_offset, rect.top()),
+                    Vec2::new(rect.width(), rect.height()),
+                );
+                let alpha = (255.0 * progress) as u8;
+
+                // Direct painting to avoid allocations
+                ui.painter().rect_filled(
+                    animated_rect,
+                    100.0, // Keep your corner radius
+                    Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
                 );
 
-                let alpha = (255.0 * row.progress) as u8;
-                self.row_shapes
-                    .push(egui::Shape::Rect(egui::epaint::RectShape {
-                        rect: animated_rect,
-                        corner_radius: egui::epaint::CornerRadius::from(100),
-                        fill: egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
-                        stroke: egui::Stroke::new(0.0, egui::Color32::TRANSPARENT),
-                        stroke_kind: egui::StrokeKind::Inside,
-                        round_to_pixels: None,
-                        blur_width: 0.0,
-                        brush: None,
-                    }));
-
-                let text_galley = ui.painter().layout_no_wrap(
-                    row.data.version.clone(),
-                    egui::FontId::new(20.0, egui::FontFamily::Proportional),
-                    egui::Color32::from_rgba_premultiplied(0, 0, 0, alpha),
+                // Cache and reuse text galley
+                let galley = row.data.text_galley.get_or_insert_with(|| {
+                    ui.painter().layout_no_wrap(
+                        row.data.version.clone(),
+                        egui::FontId::new(20.0, egui::FontFamily::Proportional),
+                        Color32::BLACK,
+                    )
+                });
+                let text_pos = Pos2::new(
+                    x_offset + rect.width() * 0.48,
+                    rect.top() + rect.height() * 0.3,
                 );
-
-                let mut text_pos = animated_rect.center();
-                text_pos.x -= animated_rect.width() * 0.02;
-                text_pos.y -= animated_rect.height() * 0.2;
-
-                self.row_shapes
-                    .push(egui::Shape::Text(egui::epaint::TextShape {
-                        pos: text_pos,
-                        galley: text_galley,
-                        override_text_color: None,
-                        angle: 0.0,
-                        fallback_color: egui::Color32::BLACK,
-                        underline: egui::Stroke::NONE,
-                        opacity_factor: row.progress,
-                    }));
+                ui.painter().galley(
+                    text_pos,
+                    galley.clone(),
+                    Color32::from_rgba_premultiplied(0, 0, 0, alpha),
+                );
             }
         });
-        ui.painter().extend(std::mem::take(&mut self.row_shapes));
-        needs_redraw
+
+        if needs_redraw {
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -204,7 +150,6 @@ struct App {
     current_page: u32,
     poll: bool,
     rows: Option<AnimatedRowList>,
-    last_width: Option<f32>,
 }
 
 impl App {
@@ -217,26 +162,15 @@ impl App {
             current_page: 1,
             poll: true,
             rows: None,
-            last_width: None,
         }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        puffin::GlobalProfiler::lock().new_frame();
+        puffin::profile_scope!("App::update");
         // We need to retrieve some rows
-        let mut resized = false;
-        let mut needs_repaint = false;
-        let screen_width = ctx.input(|i| i.screen_rect().width());
-        if let Some(last_width) = self.last_width {
-            if screen_width != last_width {
-                self.last_width = Some(screen_width);
-                resized = true;
-            }
-        } else {
-            self.last_width = Some(screen_width);
-            resized = true;
-        }
         if self.fetch_thread.is_none() && self.poll {
             let func = move |cloned_sender: crossbeam_channel::Sender<Vec<RowData>>, page: u32| {
                 delayed_fetch_operation(page, &cloned_sender);
@@ -251,7 +185,7 @@ impl eframe::App for App {
         if let Some(row_list) = &mut self.rows {
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    needs_repaint = row_list.show(resized, ui);
+                    row_list.show(ui);
                 });
             });
         } else {
@@ -275,14 +209,10 @@ impl eframe::App for App {
             };
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-
-        if needs_repaint {
-            ctx.request_repaint();
-        }
     }
 }
 
-fn delayed_fetch_operation(page: u32, sender: &crossbeam_channel::Sender<Vec<RowData>>) {
+fn delayed_fetch_operation(_page: u32, sender: &crossbeam_channel::Sender<Vec<RowData>>) {
     let count = 5;
     for _ in (0..count).rev() {
         std::thread::sleep(std::time::Duration::new(1, 0));
@@ -293,6 +223,7 @@ fn delayed_fetch_operation(page: u32, sender: &crossbeam_channel::Sender<Vec<Row
         let row: RowData = RowData {
             version: String::from(format!("ProtonGE-{}", x)),
             path: String::from(format!("some/path/{}", x)),
+            text_galley: None,
         };
         v.push(row);
     }
@@ -303,6 +234,7 @@ fn delayed_fetch_operation(page: u32, sender: &crossbeam_channel::Sender<Vec<Row
 }
 
 fn main() {
+    start_puffin_server();
     let options = set_native_options();
 
     let result = eframe::run_native(
@@ -316,5 +248,20 @@ fn main() {
         Err(e) => {
             println!("Failed to exit app properly: {}", e);
         }
+    }
+}
+
+// Simplified puffin server start (optional, removed by default for performance)
+fn start_puffin_server() {
+    // Uncomment if profiling is needed
+
+    puffin::set_scopes_on(true);
+    if let Ok(puffin_server) = puffin_http::Server::new("127.0.0.1:8585") {
+        std::process::Command::new("puffin_viewer")
+            .arg("--url")
+            .arg("127.0.0.1:8585")
+            .spawn()
+            .ok();
+        std::mem::forget(puffin_server);
     }
 }

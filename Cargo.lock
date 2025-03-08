@@ -2767,6 +2767,8 @@ dependencies = [
  "crossbeam",
  "crossbeam-channel",
  "eframe",
+ "puffin",
+ "puffin_http",
 ]
 
 [[package]]

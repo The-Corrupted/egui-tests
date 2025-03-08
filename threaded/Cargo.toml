@@ -5,5 +5,7 @@ edition = "2024"
 
 [dependencies]
 eframe = { workspace = true }
+puffin = { version = "0.19.0" }
+puffin_http = "0.16"
 crossbeam = { version = "0.8.4" }
 crossbeam-channel = { version = "0.5.14" }
