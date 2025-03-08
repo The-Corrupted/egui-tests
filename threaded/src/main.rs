@@ -22,7 +22,7 @@ struct AnimatedRow {
     data: RowData,
     progress: f32,
     start_x: Option<f32>,
-    start_time: Option<f64>,
+    start_time: f64,
     elapsed: f32,
     animation_time: f32,
     state: AnimationState,
@@ -43,7 +43,7 @@ impl RowData {
 }
 
 impl AnimatedRow {
-    fn new(row_data: RowData, duration: f32, delay: f32) -> Self {
+    fn new(row_data: RowData, start_time: f64, duration: f32, delay: f32) -> Self {
         let state = if delay == 0.0 {
             AnimationState::Animating
         } else {
@@ -52,7 +52,7 @@ impl AnimatedRow {
         Self {
             data: row_data,
             start_x: None,
-            start_time: None,
+            start_time,
             progress: 0.0,
             elapsed: 0.0,
             animation_time: duration,
@@ -64,36 +64,25 @@ impl AnimatedRow {
     pub fn update(&mut self, time: f64) -> bool {
         match self.state {
             AnimationState::Waiting => {
-                if let Some(start_time) = self.start_time {
-                    self.elapsed = (time - start_time) as f32;
-                    if self.elapsed >= self.delay {
-                        self.state = AnimationState::Animating;
-                        self.elapsed = 0.0;
-                        self.start_time = Some(time);
-                        return true;
-                    }
-                    return false;
-                } else {
-                    self.start_time = Some(time);
-                    return false;
+                self.elapsed = (time - self.start_time) as f32;
+                if self.elapsed >= self.delay {
+                    self.state = AnimationState::Animating;
+                    self.elapsed = 0.0;
+                    self.start_time = time;
+                    return true;
                 }
+                false
             }
             AnimationState::Animating => {
-                if let Some(start_time) = self.start_time {
-                    self.elapsed = (time - start_time) as f32;
-                    self.progress = egui::emath::easing::quadratic_out(
-                        (self.elapsed / self.animation_time).min(1.0),
-                    );
-                    if self.progress == 1.0 {
-                        self.state = AnimationState::Done;
-                        return false;
-                    }
-                    return true;
-                } else {
-                    // No duration so we start by animating
-                    self.start_time = Some(time);
-                    return true;
+                self.elapsed = (time - self.start_time) as f32;
+                self.progress = egui::emath::easing::quadratic_out(
+                    (self.elapsed / self.animation_time).min(1.0),
+                );
+                if self.progress == 1.0 {
+                    self.state = AnimationState::Done;
+                    return false;
                 }
+                true
             }
             AnimationState::Done => false,
         }
@@ -101,12 +90,24 @@ impl AnimatedRow {
 }
 
 impl AnimatedRowList {
-    pub fn new(rows: Vec<RowData>, animation_duration: f32, stagger_delay: f32) -> Self {
+    pub fn new(
+        rows: Vec<RowData>,
+        start_time: f64,
+        animation_duration: f32,
+        stagger_delay: f32,
+    ) -> Self {
         let len = rows.len();
         let animated_rows = rows
             .into_iter()
             .enumerate()
-            .map(|(i, data)| AnimatedRow::new(data, animation_duration, i as f32 * stagger_delay))
+            .map(|(i, data)| {
+                AnimatedRow::new(
+                    data,
+                    start_time,
+                    animation_duration,
+                    i as f32 * stagger_delay,
+                )
+            })
             .collect();
 
         let row_height = 60.0;
@@ -263,7 +264,7 @@ impl eframe::App for App {
         if self.poll {
             match self.sql_receiver.try_recv() {
                 Ok(t) => {
-                    self.rows = Some(AnimatedRowList::new(t, 1.0, 0.1));
+                    self.rows = Some(AnimatedRowList::new(t, ctx.input(|i| i.time), 1.0, 0.1));
                     self.poll = false;
                     if let Some(handle) = self.fetch_thread.take() {
                         let _ = handle.join();

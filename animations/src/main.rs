@@ -45,7 +45,7 @@ struct AnimatedRow {
     data: RowData,
     progress: f32,
     start_x: Option<f32>,
-    start_time: Option<f64>,
+    start_time: f64,
     elapsed: f32,
     animation_time: f32,
     state: AnimationState,
@@ -66,7 +66,7 @@ impl RowData {
 }
 
 impl AnimatedRow {
-    fn new(row_data: RowData, duration: f32, delay: f32) -> Self {
+    fn new(row_data: RowData, start_time: f64, duration: f32, delay: f32) -> Self {
         let state = if delay == 0.0 {
             AnimationState::Animating
         } else {
@@ -75,7 +75,7 @@ impl AnimatedRow {
         Self {
             data: row_data,
             start_x: None,
-            start_time: None,
+            start_time,
             progress: 0.0,
             elapsed: 0.0,
             animation_time: duration,
@@ -88,35 +88,25 @@ impl AnimatedRow {
         puffin::profile_scope!("AnimatedRow::update");
         match self.state {
             AnimationState::Waiting => {
-                if let Some(start_time) = self.start_time {
-                    self.elapsed = (time - start_time) as f32;
-                    if self.elapsed >= self.delay {
-                        self.state = AnimationState::Animating;
-                        self.elapsed = 0.0;
-                        self.start_time = Some(time);
-                        return true;
-                    }
-                    return false;
-                } else {
-                    self.start_time = Some(time);
-                    return false;
+                self.elapsed = (time - self.start_time) as f32;
+                if self.elapsed >= self.delay {
+                    self.state = AnimationState::Animating;
+                    self.elapsed = 0.0;
+                    self.start_time = time;
+                    return true;
                 }
+                false
             }
             AnimationState::Animating => {
-                if let Some(start_time) = self.start_time {
-                    self.elapsed = (time - start_time) as f32;
-                    self.progress = egui::emath::easing::quadratic_out(
-                        (self.elapsed / self.animation_time).min(1.0),
-                    );
-                    if self.progress == 1.0 {
-                        self.state = AnimationState::Done;
-                        return false;
-                    }
-                    return true;
-                } else {
-                    self.start_time = Some(time);
-                    return true;
+                self.elapsed = (time - self.start_time) as f32;
+                self.progress = egui::emath::easing::quadratic_out(
+                    (self.elapsed / self.animation_time).min(1.0),
+                );
+                if self.progress == 1.0 {
+                    self.state = AnimationState::Done;
+                    return false;
                 }
+                true
             }
             AnimationState::Done => false,
         }
@@ -124,12 +114,24 @@ impl AnimatedRow {
 }
 
 impl AnimatedRowList {
-    pub fn new(rows: Vec<RowData>, animation_duration: f32, stagger_delay: f32) -> Self {
+    pub fn new(
+        rows: Vec<RowData>,
+        start_time: f64,
+        animation_duration: f32,
+        stagger_delay: f32,
+    ) -> Self {
         let len = rows.len();
         let animated_rows = rows
             .into_iter()
             .enumerate()
-            .map(|(i, data)| AnimatedRow::new(data, animation_duration, i as f32 * stagger_delay))
+            .map(|(i, data)| {
+                AnimatedRow::new(
+                    data,
+                    start_time,
+                    animation_duration,
+                    i as f32 * stagger_delay,
+                )
+            })
             .collect();
 
         let row_height = 60.0;
@@ -217,7 +219,7 @@ struct AnimationApp {
 }
 
 impl AnimationApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut it = Self::default();
         let mut rows = Vec::with_capacity(100);
         for x in 0..=100 {
@@ -226,7 +228,7 @@ impl AnimationApp {
                 format!("/some/path/{}", x),
             ));
         }
-        it.row_list = AnimatedRowList::new(rows, 1.0, 0.1);
+        it.row_list = AnimatedRowList::new(rows, cc.egui_ctx.input(|i| i.time), 1.0, 0.1);
         it
     }
 }
