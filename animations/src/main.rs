@@ -18,6 +18,14 @@ fn main() {
     }
 }
 
+pub fn set_native_options() -> eframe::NativeOptions {
+    let mut options = eframe::NativeOptions::default();
+    options.centered = true;
+    options.vsync = true;
+    options.renderer = eframe::Renderer::Wgpu;
+    options
+}
+
 #[derive(Default)]
 enum AnimationState {
     Waiting,
@@ -37,6 +45,7 @@ struct AnimatedRow {
     data: RowData,
     progress: f32,
     start_x: Option<f32>,
+    start_time: Option<f64>,
     elapsed: f32,
     animation_time: f32,
     state: AnimationState,
@@ -46,6 +55,7 @@ struct AnimatedRow {
 #[derive(Default)]
 struct AnimatedRowList {
     rows: Vec<AnimatedRow>,
+    row_shapes: Vec<egui::Shape>,
     row_height: f32,
 }
 
@@ -65,6 +75,7 @@ impl AnimatedRow {
         Self {
             data: row_data,
             start_x: None,
+            start_time: None,
             progress: 0.0,
             elapsed: 0.0,
             animation_time: duration,
@@ -73,28 +84,39 @@ impl AnimatedRow {
         }
     }
 
-    pub fn update(&mut self, dt: f32) -> bool {
+    pub fn update(&mut self, time: f64) -> bool {
         puffin::profile_scope!("AnimatedRow::update");
         match self.state {
             AnimationState::Waiting => {
-                self.elapsed += dt;
-                if self.elapsed >= self.delay {
-                    self.state = AnimationState::Animating;
-                    self.elapsed = 0.0;
-                    return true;
-                }
-                false
-            }
-            AnimationState::Animating => {
-                self.elapsed += dt;
-                self.progress = egui::emath::easing::quadratic_out(
-                    (self.elapsed / self.animation_time).min(1.0),
-                );
-                if self.progress == 1.0 {
-                    self.state = AnimationState::Done;
+                if let Some(start_time) = self.start_time {
+                    self.elapsed = (time - start_time) as f32;
+                    if self.elapsed >= self.delay {
+                        self.state = AnimationState::Animating;
+                        self.elapsed = 0.0;
+                        self.start_time = Some(time);
+                        return true;
+                    }
+                    return false;
+                } else {
+                    self.start_time = Some(time);
                     return false;
                 }
-                true
+            }
+            AnimationState::Animating => {
+                if let Some(start_time) = self.start_time {
+                    self.elapsed = (time - start_time) as f32;
+                    self.progress = egui::emath::easing::quadratic_out(
+                        (self.elapsed / self.animation_time).min(1.0),
+                    );
+                    if self.progress == 1.0 {
+                        self.state = AnimationState::Done;
+                        return false;
+                    }
+                    return true;
+                } else {
+                    self.start_time = Some(time);
+                    return true;
+                }
             }
             AnimationState::Done => false,
         }
@@ -103,6 +125,7 @@ impl AnimatedRow {
 
 impl AnimatedRowList {
     pub fn new(rows: Vec<RowData>, animation_duration: f32, stagger_delay: f32) -> Self {
+        let len = rows.len();
         let animated_rows = rows
             .into_iter()
             .enumerate()
@@ -113,23 +136,22 @@ impl AnimatedRowList {
 
         Self {
             rows: animated_rows,
+            row_shapes: Vec::with_capacity(len * 2),
             row_height,
         }
     }
 
     pub fn show(&mut self, resized: bool, ui: &mut egui::Ui) -> bool {
         puffin::profile_scope!("AnimatedRowList::show");
-        let mut row_shapes: Vec<egui::Shape> = Vec::new();
         let mut needs_redraw = false;
-
         ui.vertical(|ui| {
-            let dt = ui.input(|i| i.stable_dt);
+            let time = ui.input(|i| i.time);
             for row in &mut self.rows {
                 if row.start_x.is_none() || resized {
                     row.start_x = Some(ui.max_rect().width());
                 }
 
-                needs_redraw |= row.update(dt);
+                needs_redraw |= row.update(time);
 
                 let (id, rect) =
                     ui.allocate_space(egui::Vec2::new(ui.available_width(), self.row_height));
@@ -148,17 +170,18 @@ impl AnimatedRowList {
                     egui::Vec2::new(rect.width(), rect.height()),
                 );
 
-                let alpha = (255f32 * row.progress) as u8;
-                row_shapes.push(egui::Shape::Rect(egui::epaint::RectShape {
-                    rect: animated_rect,
-                    corner_radius: egui::epaint::CornerRadius::from(100),
-                    fill: egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
-                    stroke: egui::Stroke::new(0.0, egui::Color32::TRANSPARENT),
-                    stroke_kind: egui::StrokeKind::Inside,
-                    round_to_pixels: None,
-                    blur_width: 0.0,
-                    brush: None,
-                }));
+                let alpha = (255.0 * row.progress) as u8;
+                self.row_shapes
+                    .push(egui::Shape::Rect(egui::epaint::RectShape {
+                        rect: animated_rect,
+                        corner_radius: egui::epaint::CornerRadius::from(100),
+                        fill: egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
+                        stroke: egui::Stroke::new(0.0, egui::Color32::TRANSPARENT),
+                        stroke_kind: egui::StrokeKind::Inside,
+                        round_to_pixels: None,
+                        blur_width: 0.0,
+                        brush: None,
+                    }));
 
                 let text_galley = ui.painter().layout_no_wrap(
                     row.data.version.clone(),
@@ -170,28 +193,21 @@ impl AnimatedRowList {
                 text_pos.x -= animated_rect.width() * 0.02;
                 text_pos.y -= animated_rect.height() * 0.2;
 
-                row_shapes.push(egui::Shape::Text(egui::epaint::TextShape {
-                    pos: text_pos,
-                    galley: text_galley,
-                    override_text_color: None,
-                    angle: 0.0,
-                    fallback_color: egui::Color32::BLACK,
-                    underline: egui::Stroke::NONE,
-                    opacity_factor: row.progress,
-                }));
+                self.row_shapes
+                    .push(egui::Shape::Text(egui::epaint::TextShape {
+                        pos: text_pos,
+                        galley: text_galley,
+                        override_text_color: None,
+                        angle: 0.0,
+                        fallback_color: egui::Color32::BLACK,
+                        underline: egui::Stroke::NONE,
+                        opacity_factor: row.progress,
+                    }));
             }
         });
-        ui.painter().extend(row_shapes);
+        ui.painter().extend(std::mem::take(&mut self.row_shapes));
         needs_redraw
     }
-}
-
-pub fn set_native_options() -> eframe::NativeOptions {
-    let mut options = eframe::NativeOptions::default();
-    options.centered = true;
-    options.vsync = true;
-    options.renderer = eframe::Renderer::Wgpu;
-    options
 }
 
 #[derive(Default)]
@@ -203,49 +219,14 @@ struct AnimationApp {
 impl AnimationApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut it = Self::default();
-        let rows = vec![
-            RowData::new(
-                String::from("GE-Proton9-23"),
-                String::from("/home/corrupted/.local/23"),
-            ),
-            RowData::new(
-                String::from("GE-Proton9-24"),
-                String::from("/home/corrupted/.local/24"),
-            ),
-            RowData::new(
-                String::from("GE-Proton9-25"),
-                String::from("/home/corrupted/.local/25"),
-            ),
-            RowData::new(
-                String::from("GE-Proton9-25"),
-                String::from("/home/corrupted/.local/25"),
-            ),
-            RowData::new(
-                String::from("GE-Proton9-25"),
-                String::from("/home/corrupted/.local/25"),
-            ),
-            RowData::new(
-                String::from("GE-Proton9-25"),
-                String::from("/home/corrupted/.local/25"),
-            ),
-            RowData::new(
-                String::from("GE-Proton9-25"),
-                String::from("/home/corrupted/.local/25"),
-            ),
-            RowData::new(
-                String::from("GE-Proton9-25"),
-                String::from("/home/corrupted/.local/25"),
-            ),
-            RowData::new(
-                String::from("GE-Proton9-25"),
-                String::from("/home/corrupted/.local/25"),
-            ),
-            RowData::new(
-                String::from("GE-Proton9-25"),
-                String::from("/home/corrupted/.local/25"),
-            ),
-        ];
-        it.row_list = AnimatedRowList::new(rows, 3.0, 0.1);
+        let mut rows = Vec::with_capacity(100);
+        for x in 0..=100 {
+            rows.push(RowData::new(
+                format!("GE-Proton9-{}", x),
+                format!("/some/path/{}", x),
+            ));
+        }
+        it.row_list = AnimatedRowList::new(rows, 1.0, 0.1);
         it
     }
 }
@@ -263,12 +244,18 @@ impl eframe::App for AnimationApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            need_redraw |= self.row_list.show(resized, ui);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                need_redraw |= self.row_list.show(resized, ui);
+            })
         });
 
         if need_redraw {
             ctx.request_repaint();
         }
+
+        let frame_time = ctx.input(|i| i.stable_dt);
+        let fps = 1.0 / frame_time;
+        println!("FPS: {}", fps);
     }
 }
 
