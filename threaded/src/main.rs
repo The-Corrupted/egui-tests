@@ -1,6 +1,7 @@
 use crossbeam_channel::unbounded;
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 use std::sync::Arc;
+
 // START PREPROCESSOR PASTE
 
 #[derive(Default)]
@@ -43,7 +44,7 @@ impl AnimatedRow {
     fn get_progress(&self, time: f64) -> f32 {
         let elapsed = (time - self.start_time - self.delay as f64).max(0.0) as f32;
         let t = (elapsed / self.animation_time).min(1.0);
-        -t * (t - 2.0) // Inline quadratic out easin
+        egui::emath::easing::quadratic_out(t)
     }
 }
 
@@ -78,7 +79,6 @@ impl AnimatedRowList {
         }
     }
 
-    #[inline]
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let time = ui.input(|i| i.time);
         let mut needs_redraw = false;
@@ -143,26 +143,33 @@ pub fn set_native_options() -> eframe::NativeOptions {
     options
 }
 
+enum RowState {
+    Fetching(Option<crossbeam_channel::Receiver<Vec<RowData>>>),
+    Displaying(AnimatedRowList),
+}
+
 struct App {
-    sql_sender: crossbeam_channel::Sender<Vec<RowData>>,
-    sql_receiver: crossbeam_channel::Receiver<Vec<RowData>>,
-    fetch_thread: Option<std::thread::JoinHandle<()>>,
-    current_page: u32,
-    poll: bool,
-    rows: Option<AnimatedRowList>,
+    state: RowState,
 }
 
 impl App {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let (s, r) = unbounded();
         Self {
-            sql_sender: s,
-            sql_receiver: r,
-            fetch_thread: None,
-            current_page: 1,
-            poll: true,
-            rows: None,
+            state: RowState::Fetching(None),
         }
+    }
+
+    fn start_fetch(&mut self) {
+        let (s, r) = unbounded();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let rows = (0..=100)
+                .map(|x| RowData::new(format!("GE-Proton-{}", x), format!("/some/path/{}", x)))
+                .collect();
+            s.send(rows).expect("Failed to send rows");
+        });
+
+        self.state = RowState::Fetching(Some(r));
     }
 }
 
@@ -170,66 +177,41 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         puffin::GlobalProfiler::lock().new_frame();
         puffin::profile_scope!("App::update");
-        // We need to retrieve some rows
-        if self.fetch_thread.is_none() && self.poll {
-            let func = move |cloned_sender: crossbeam_channel::Sender<Vec<RowData>>, page: u32| {
-                delayed_fetch_operation(page, &cloned_sender);
-            };
-            let cloned_sender = self.sql_sender.clone();
-            let page = self.current_page;
-            let handle = std::thread::spawn(move || func(cloned_sender, page));
-            self.fetch_thread = Some(handle);
-        }
 
-        // If we find some rows, display them. If not, say we're fetching them
-        if let Some(row_list) = &mut self.rows {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    row_list.show(ui);
-                });
-            });
-        } else {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.label("Fetching rows");
-            });
-        }
-
-        // Check if the sender has finished
-        if self.poll {
-            match self.sql_receiver.try_recv() {
-                Ok(t) => {
-                    self.rows = Some(AnimatedRowList::new(t, ctx.input(|i| i.time), 1.0, 0.1));
-                    self.poll = false;
-                    if let Some(handle) = self.fetch_thread.take() {
-                        let _ = handle.join();
-                        self.fetch_thread = None;
+        match &mut self.state {
+            RowState::Fetching(receiver_opt) => {
+                if let Some(receiver) = receiver_opt {
+                    if let Ok(rows) = receiver.try_recv() {
+                        self.state = RowState::Displaying(AnimatedRowList::new(
+                            rows,
+                            ctx.input(|i| i.time),
+                            1.0,
+                            0.1,
+                        ));
+                        ctx.request_repaint();
+                    } else {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(100));
                     }
+                } else {
+                    self.start_fetch();
                 }
-                Err(_) => {}
-            };
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.label("Fetching rows");
+                });
+            }
+            RowState::Displaying(row_list) => {
+                let mut refresh = false;
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        refresh = ui.button("Refresh").clicked();
+                        row_list.show(ui);
+                    });
+                });
+                if refresh {
+                    self.start_fetch();
+                }
+            }
         }
-    }
-}
-
-fn delayed_fetch_operation(_page: u32, sender: &crossbeam_channel::Sender<Vec<RowData>>) {
-    let count = 5;
-    for _ in (0..count).rev() {
-        std::thread::sleep(std::time::Duration::new(1, 0));
-    }
-
-    let mut v: Vec<RowData> = Vec::new();
-    for x in 0..100 {
-        let row: RowData = RowData {
-            version: String::from(format!("ProtonGE-{}", x)),
-            path: String::from(format!("some/path/{}", x)),
-            text_galley: None,
-        };
-        v.push(row);
-    }
-    match sender.send(v) {
-        Ok(()) => {}
-        Err(_) => {}
     }
 }
 
